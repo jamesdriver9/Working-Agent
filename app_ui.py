@@ -12,11 +12,11 @@ from llm_agent import get_mcp_config, get_agent_app
 # =========================================================
 # 1. BOOTSTRAP: HEALTH CHECKS
 # =========================================================
-st.set_page_config(page_title="G-Workspace Agent v2026", layout="wide")
-st.title("Workspace & Search Agent")
+st.set_page_config(page_title="G-Workspace Agent", layout="wide")
+st.title("Google Workspace Agent")
 
 with st.sidebar:
-    st.header("System Health")
+    st.header("Connections")
     if os.getenv("GOOGLE_API_KEY"):
         st.success("Gemini API Key found")
     else:

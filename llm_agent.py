@@ -1,6 +1,9 @@
 import os
 import re
+from ddgs import DDGS
+from mcp.types import PaginatedRequestParams
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.agents import create_agent
 from langchain_mcp_adapters.client import MultiServerMCPClient  # noqa: F401 (re-exported)
@@ -10,16 +13,17 @@ memory = MemorySaver()
 
 # System Prompt
 GDRIVE_INTEL_PROMPT = """You are a Google Drive Intelligence Agent.
-Today is March 28, 2026. 
 
-You have two modes of operation:
-1. PRIVATE DRIVE FILES: If the user asks about their personal files, documents, or spreadsheets, you MUST use the 'list_drive_files' tool.
-2. THE WEB (Recipes, News, Facts): If the user asks for general web information, DO NOT use any tools. Simply answer the question directly. Your direct answers are natively connected to Google Search.
+You have three tools available:
+1. 'list_drive_files' — search for files in Google Drive by name. Use this when the user wants to know what files exist.
+2. 'read_drive_file' — read the full contents of a file. Pass the filename (or part of it). Use this whenever the user wants to see what is inside a file.
+3. 'web_search' — for live internet queries: news, facts, prices, current events. Pass a plain search query string.
 
 Rules:
-- If you search Drive and find nothing, do not apologize. Just answer directly to trigger your native web knowledge.
-- Be concise and helpful.
-- When searching Drive, NEVER use the 'fullText' operator. Search by name instead."""
+- If the user asks about file contents, always call 'read_drive_file' directly with the filename. Do not call list_drive_files first.
+- Use 'web_search' for anything requiring live data — do not answer current events from memory.
+- When searching Drive, NEVER use the 'fullText' operator. Search by name only.
+- Be concise and helpful."""
 
 async def get_agent_app(mcp_client: MultiServerMCPClient):
     mcp_tools = await mcp_client.get_tools()
@@ -69,7 +73,33 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
             
         final_mcp_tools.append(wrap_tool(t))
 
-    # ... remaining model and create_agent code ...
+    # Tool that pages through Drive resources to find a file by name, then reads it
+    async def _read_drive_file(filename: str) -> str:
+        async with mcp_client.session("google_workspace") as session:
+            cursor = None
+            for _ in range(20):  # cap at 20 pages (200 files)
+                params = PaginatedRequestParams(cursor=cursor) if cursor else None
+                listing = await session.list_resources(params=params)
+
+                for resource in listing.resources:
+                    if filename.lower() in resource.name.lower():
+                        content_result = await session.read_resource(str(resource.uri))
+                        if content_result.contents:
+                            return getattr(content_result.contents[0], "text", str(content_result.contents[0]))
+                        return "File found but is empty or cannot be read as text."
+
+                cursor = getattr(listing, "nextCursor", None)
+                if not cursor:
+                    break
+
+            return f"No file matching '{filename}' was found in Google Drive."
+
+    read_file_tool = StructuredTool.from_function(
+        coroutine=_read_drive_file,
+        name="read_drive_file",
+        description="Read the full text content of a Google Drive file. Pass the filename (or part of it) and the tool will find and return the contents automatically.",
+    )
+    final_mcp_tools.append(read_file_tool)
 
     # Initialize Model
     model = ChatGoogleGenerativeAI(
@@ -78,12 +108,25 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
         temperature=0.0 # Stable for tool usage
     )
     
-    # Bind tools including native web grounding
-    model_with_tools = model.bind_tools(final_mcp_tools + [{"google_search": {}}])
+    async def _web_search(query: str) -> str:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        if not results:
+            return "No results found."
+        return "\n\n".join(
+            f"**{r['title']}**\n{r['body']}\nSource: {r['href']}"
+            for r in results
+        )
+
+    web_search_tool = StructuredTool.from_function(
+        coroutine=_web_search,
+        name="web_search",
+        description="Search the web for current news, facts, or any live information. Input is a plain search query string.",
+    )
 
     return create_agent(
-        model=model_with_tools,
-        tools=final_mcp_tools,
+        model=model,
+        tools=final_mcp_tools + [web_search_tool],
         checkpointer=memory,
         system_prompt=GDRIVE_INTEL_PROMPT
     )
