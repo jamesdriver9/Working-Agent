@@ -1,0 +1,10 @@
+# Secrets (CRITICAL - DO NOT UPLOAD)
+service-account.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+
