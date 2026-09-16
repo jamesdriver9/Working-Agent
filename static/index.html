@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Google Drive Agent</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --navy:    #0D1B3E;
+      --mid:     #1A2D6B;
+      --card:    #243580;
+      --teal:    #00BFA5;
+      --blue:    #448AFF;
+      --white:   #FFFFFF;
+      --dim:     #A0AEC0;
+      --light-bg:#EEF2FF;
+      --input-bg:#1A2D6B;
+      --error:   #FF5252;
+    }
+
+    body {
+      font-family: 'Segoe UI', Calibri, sans-serif;
+      background: var(--navy);
+      color: var(--white);
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      width: 260px;
+      min-width: 260px;
+      background: var(--mid);
+      display: flex;
+      flex-direction: column;
+      padding: 24px 16px;
+      border-right: 1px solid var(--card);
+    }
+
+    #sidebar h1 {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--white);
+      margin-bottom: 4px;
+    }
+
+    #sidebar .subtitle {
+      font-size: 12px;
+      color: var(--teal);
+      margin-bottom: 28px;
+    }
+
+    .status-block { margin-bottom: 12px; }
+
+    .status-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--dim);
+      margin-bottom: 6px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.green  { background: var(--teal); }
+    .dot.red    { background: var(--error); }
+    .dot.pulse  { background: var(--teal); animation: pulse 1.4s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    .agent-card {
+      background: var(--card);
+      border: 1px solid var(--teal);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      transition: box-shadow 0.2s;
+    }
+    .agent-card .name { font-weight: 700; color: var(--teal); margin-bottom: 2px; }
+    .agent-card .desc { color: var(--dim); }
+
+    .agent-card.active {
+      background: #1a3d6e;
+      box-shadow: 0 0 10px 3px rgba(0,191,165,0.45);
+      border-color: var(--teal);
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+
+    .new-chat-btn {
+      margin-top: auto;
+      background: var(--teal);
+      color: var(--navy);
+      border: none;
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      width: 100%;
+    }
+    .new-chat-btn:hover { opacity: 0.88; }
+
+    /* ── Main chat area ── */
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    #messages::-webkit-scrollbar { width: 6px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: var(--card); border-radius: 3px; }
+
+    .msg { display: flex; flex-direction: column; max-width: 780px; }
+
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--dim);
+      margin-bottom: 4px;
+    }
+
+    .msg-bubble {
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .msg.user .msg-bubble {
+      background: var(--blue);
+      color: var(--white);
+    }
+
+    .msg.assistant .msg-bubble {
+      background: var(--mid);
+      color: var(--white);
+      border: 1px solid var(--card);
+    }
+
+    .msg.assistant .msg-bubble.error {
+      border-color: var(--error);
+      color: var(--error);
+    }
+
+    .thinking {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      padding: 12px 16px;
+      background: var(--mid);
+      border: 1px solid var(--card);
+      border-radius: 10px;
+    }
+
+    .thinking span {
+      width: 7px; height: 7px;
+      background: var(--teal);
+      border-radius: 50%;
+      animation: bounce 1.2s infinite;
+    }
+    .thinking span:nth-child(2) { animation-delay: 0.2s; }
+    .thinking span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40%            { transform: translateY(-6px); }
+    }
+
+    /* ── Input bar ── */
+    #input-bar {
+      padding: 16px 32px 24px;
+      border-top: 1px solid var(--card);
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+    }
+
+    #prompt {
+      flex: 1;
+      background: var(--input-bg);
+      border: 1px solid var(--card);
+      border-radius: 8px;
+      color: var(--white);
+      font-size: 14px;
+      padding: 12px 14px;
+      resize: none;
+      outline: none;
+      max-height: 140px;
+      min-height: 46px;
+      line-height: 1.5;
+      font-family: inherit;
+    }
+    #prompt::placeholder { color: var(--dim); }
+    #prompt:focus { border-color: var(--teal); }
+
+    #send-btn {
+      background: var(--teal);
+      color: var(--navy);
+      border: none;
+      border-radius: 8px;
+      width: 46px;
+      height: 46px;
+      font-size: 20px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    #send-btn:hover { opacity: 0.88; }
+    #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .welcome {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 12px;
+      color: var(--dim);
+      text-align: center;
+    }
+    .welcome h2 { color: var(--white); font-size: 22px; }
+    .welcome p  { font-size: 14px; max-width: 400px; }
+  </style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <h1>Google Drive Agent</h1>
+  <p class="subtitle">Powered by Gemini 2.5 Flash</p>
+
+  <div class="status-block">
+    <div class="status-label">Connections</div>
+    <div class="status-row" id="api-status">
+      <div class="dot" id="api-dot"></div>
+      <span id="api-text">Checking...</span>
+    </div>
+  </div>
+
+  <div class="status-block" style="margin-top:16px">
+    <div class="status-label">Agents</div>
+    <div class="agent-card" id="card-orchestrator">
+      <div class="name">Orchestrator</div>
+      <div class="desc">Routes requests to specialists</div>
+    </div>
+    <div class="agent-card" id="card-reader_agent">
+      <div class="name">Reader Agent</div>
+      <div class="desc">Lists &amp; reads Drive files</div>
+    </div>
+    <div class="agent-card" id="card-editor_agent">
+      <div class="name">Editor Agent</div>
+      <div class="desc">Creates &amp; updates Docs/Sheets</div>
+    </div>
+    <div class="agent-card" id="card-coder_agent">
+      <div class="name">Coder Agent</div>
+      <div class="desc">Researches &amp; formats reports</div>
+    </div>
+  </div>
+
+  <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
+</div>
+
+<!-- Main -->
+<div id="main">
+  <div id="messages">
+    <div class="welcome" id="welcome">
+      <h2>Google Drive Agent</h2>
+      <p>Ask me to find, read, create, or update your Google Drive files.</p>
+    </div>
+  </div>
+
+  <div id="input-bar">
+    <textarea id="prompt" rows="1" placeholder="Ask about your Drive..." onkeydown="handleKey(event)"></textarea>
+    <button id="send-btn" onclick="sendMessage()">&#9654;</button>
+  </div>
+</div>
+
+<script>
+  // Session ID — persists across page refreshes
+  let sessionId = localStorage.getItem('drive_agent_session');
+  if (!sessionId) {
+    sessionId = crypto.randomUUID();
+    localStorage.setItem('drive_agent_session', sessionId);
+  }
+
+  let busy = false;
+
+  // Health check → update sidebar status
+  async function checkHealth() {
+    const dot  = document.getElementById('api-dot');
+    const text = document.getElementById('api-text');
+    try {
+      const r = await fetch('/health');
+      if (r.ok) {
+        dot.className  = 'dot green';
+        text.textContent = 'API connected';
+      } else {
+        throw new Error();
+      }
+    } catch {
+      dot.className  = 'dot red';
+      text.textContent = 'API unreachable';
+    }
+  }
+  checkHealth();
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+    // Auto-resize textarea
+    setTimeout(() => {
+      const t = document.getElementById('prompt');
+      t.style.height = 'auto';
+      t.style.height = Math.min(t.scrollHeight, 140) + 'px';
+    }, 0);
+  }
+
+  function addMessage(role, content, isError) {
+    const welcome = document.getElementById('welcome');
+    if (welcome) welcome.remove();
+
+    const msgs = document.getElementById('messages');
+    const div  = document.createElement('div');
+    div.className = `msg ${role}`;
+
+    const label = document.createElement('div');
+    label.className = 'msg-label';
+    label.textContent = role === 'user' ? 'You' : 'Assistant';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble' + (isError ? ' error' : '');
+    bubble.textContent = content;
+
+    div.appendChild(label);
+    div.appendChild(bubble);
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    return bubble;
+  }
+
+  function addThinking() {
+    const msgs = document.getElementById('messages');
+    const div  = document.createElement('div');
+    div.className = 'msg assistant';
+    div.id = 'thinking-msg';
+
+    const label = document.createElement('div');
+    label.className = 'msg-label';
+    label.textContent = 'Assistant';
+
+    const thinking = document.createElement('div');
+    thinking.className = 'thinking';
+    thinking.innerHTML = '<span></span><span></span><span></span>';
+
+    div.appendChild(label);
+    div.appendChild(thinking);
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    return div;
+  }
+
+  async function sendMessage() {
+    if (busy) return;
+    const input  = document.getElementById('prompt');
+    const prompt = input.value.trim();
+    if (!prompt) return;
+
+    busy = true;
+    document.getElementById('send-btn').disabled = true;
+    input.value = '';
+    input.style.height = 'auto';
+
+    clearActiveAgents();
+    activateAgent('orchestrator');
+
+    addMessage('user', prompt);
+    const thinkingEl = addThinking();
+
+    let responseBubble = null;
+
+    try {
+      const res = await fetch('/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, session_id: sessionId }),
+      });
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') break;
+
+          try {
+            const evt = JSON.parse(raw);
+
+            if (evt.type === 'agent_active' && evt.agent) {
+              activateAgent(evt.agent);
+            }
+
+            if (evt.type === 'content' && evt.content) {
+              // First real content — replace thinking indicator
+              if (!responseBubble) {
+                thinkingEl.remove();
+                const msgs = document.getElementById('messages');
+                const div  = document.createElement('div');
+                div.className = 'msg assistant';
+                const label = document.createElement('div');
+                label.className = 'msg-label';
+                label.textContent = 'Assistant';
+                responseBubble = document.createElement('div');
+                responseBubble.className = 'msg-bubble';
+                div.appendChild(label);
+                div.appendChild(responseBubble);
+                msgs.appendChild(div);
+              }
+              responseBubble.textContent = evt.content;
+              document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+            }
+
+            if (evt.type === 'error') {
+              thinkingEl.remove();
+              addMessage('assistant', evt.content, true);
+            }
+          } catch { /* malformed SSE line, skip */ }
+        }
+      }
+
+      // If agent never emitted content
+      if (!responseBubble) thinkingEl.remove();
+
+    } catch (err) {
+      thinkingEl.remove();
+      addMessage('assistant', `Connection error: ${err.message}`, true);
+    }
+
+    busy = false;
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('prompt').focus();
+  }
+
+  function activateAgent(agentName) {
+    const card = document.getElementById(`card-${agentName}`);
+    if (card) card.classList.add('active');
+  }
+
+  function clearActiveAgents() {
+    document.querySelectorAll('.agent-card.active').forEach(c => c.classList.remove('active'));
+  }
+
+  function newChat() {
+    sessionId = crypto.randomUUID();
+    localStorage.setItem('drive_agent_session', sessionId);
+    const msgs = document.getElementById('messages');
+    msgs.innerHTML = `
+      <div class="welcome" id="welcome">
+        <h2>Google Drive Agent</h2>
+        <p>Ask me to find, read, create, or update your Google Drive files.</p>
+      </div>`;
+  }
+</script>
+</body>
+</html>

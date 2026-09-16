@@ -3,14 +3,13 @@ services:
     build: .
     container_name: gdrive_intel_agent
     ports:
-      - "8501:8501"
+      - "8000:8000"
     env_file:
       - .env
     environment:
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}  
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - GCP_OAUTH_JSON_RAW=${GCP_OAUTH_JSON_RAW}
       - GCP_TOKEN_JSON_RAW=${GCP_TOKEN_JSON_RAW}
-    # Persistence for the MCP cache (speeds up repeated tool calls)
     volumes:
       - mcp_cache:/tmp/mcp-cache
     restart: unless-stopped

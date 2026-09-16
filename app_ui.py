@@ -68,7 +68,9 @@ async def run_agent_workflow(user_prompt):
                 if isinstance(last_msg.content, list):
                     parts = []
                     for block in last_msg.content:
-                        if isinstance(block, dict):
+                        if isinstance(block, str):
+                            parts.append(block)
+                        elif isinstance(block, dict):
                             if block.get("type") == "text":
                                 parts.append(block.get("text", ""))
                             if "grounding_metadata" in block or "groundingMetadata" in block:
