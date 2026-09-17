@@ -117,6 +117,19 @@
     }
     .new-chat-btn:hover { opacity: 0.88; }
 
+    .audit-btn {
+      margin-top: 8px;
+      background: transparent;
+      color: var(--dim);
+      border: 1px solid var(--card);
+      border-radius: 6px;
+      padding: 9px;
+      font-size: 13px;
+      cursor: pointer;
+      width: 100%;
+    }
+    .audit-btn:hover { border-color: var(--teal); color: var(--white); }
+
     /* ── Main chat area ── */
     #main {
       flex: 1;
@@ -294,6 +307,7 @@
   </div>
 
   <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
+  <button class="audit-btn" onclick="downloadAudit()">&#8681; Download Audit Log</button>
 </div>
 
 <!-- Main -->
@@ -495,6 +509,25 @@
 
   function clearActiveAgents() {
     document.querySelectorAll('.agent-card.active').forEach(c => c.classList.remove('active'));
+  }
+
+  async function downloadAudit() {
+    try {
+      const res = await fetch(`/audit/${sessionId}`);
+      if (res.status === 404) {
+        alert('No audit log yet — send a message first.');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `audit_${sessionId.slice(0, 8)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(`Download failed: ${err.message}`);
+    }
   }
 
   function newChat() {

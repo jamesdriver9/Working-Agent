@@ -1,9 +1,10 @@
 import os
 import re
 import json
+import time
+from mcp.types import PaginatedRequestParams
 from pathlib import Path
 from ddgs import DDGS
-from mcp.types import PaginatedRequestParams
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -32,8 +33,25 @@ Rules:
     1. Extract text between ===DOC=== and ===SHEET===, call editor_agent to create a Google Doc with that content. Use a clear title from the user's request.
     2. Extract text between ===SHEET=== and ===END===, call editor_agent to create a Google Sheet with that CSV data. Use the same title with " - Data" appended.
 - Pass the user's full request as the query when calling an agent.
-- If a task requires reading first then writing, call reader_agent first, then editor_agent.
-- Be concise in your final response — for Drive tasks, tell the user what Doc and Sheet were created."""
+- Be concise in your final response — for Drive tasks, tell the user what Doc and Sheet were created.
+
+Multi-step workflow — use this automatically when the request implies it:
+
+RESEARCH REPORT (no existing file):
+When the user wants a new report, analysis, or brief on a topic:
+  Step 1 — Call coder_agent with the full research request.
+  Step 2 — Call editor_agent to save the result as a new Google Doc (and Sheet if data is present).
+
+CONTEXTUAL REPORT (enrich an existing Drive file):
+When the user wants to update, review, or enrich an existing Drive document with live research:
+  Step 1 — Call reader_agent to retrieve the relevant Drive file.
+  Step 2 — If reader_agent returns file content, call coder_agent with:
+            "EXISTING CONTEXT:\\n<reader output>\\n\\nRESEARCH REQUEST:\\n<what to research and produce>"
+            If reader_agent returns an error or says the file was not found, proceed WITHOUT the file:
+            call coder_agent with just the research request and note the file could not be retrieved.
+  Step 3 — Call editor_agent to save the result as a new Google Doc (and Sheet if data is present).
+
+Always infer which pattern applies from natural language. Never stop because reader_agent failed — always proceed to coder_agent."""
 
 READER_PROMPT = """You are a Google Drive reader specialist.
 
@@ -56,6 +74,7 @@ First, decide which mode applies:
 MODE A — QUICK LOOKUP: The user wants a simple factual answer (current price, today's news, a quick fact).
 - Use web_search once or twice.
 - Return a short, plain conversational answer. No delimiters, no Drive output.
+- Always end with a Sources section listing the page title and URL for every result you used.
 
 MODE B — RESEARCH REPORT: The user wants analysis, a comparison, or content saved to Google Drive.
 - Use web_search multiple times to gather thorough information.
@@ -70,8 +89,17 @@ MODE B — RESEARCH REPORT: The user wants analysis, a comparison, or content sa
 
 Rules for MODE B:
 - The DOC section is plain text (it goes into Google Docs).
+- Always end the DOC section with a Sources section listing the page title and URL for every result used.
 - The SHEET section must be valid CSV — quote any fields that contain commas.
-- Always include at least one comparison table in the DOC and matching data in the SHEET."""
+- Always include at least one comparison table in the DOC and matching data in the SHEET.
+
+MODE C — CONTEXTUAL REPORT: The query contains "EXISTING CONTEXT:" followed by a Drive document, and "RESEARCH REQUEST:" with what to produce.
+- Read the existing context carefully — it is the user's own notes, agenda, or brief.
+- Use web_search to find current intelligence that supplements and enriches that context (news, financials, competitor data, industry trends — whatever is most relevant).
+- Use execute_python to merge and structure both sources into a polished output.
+- Return output in the ===DOC=== / ===SHEET=== / ===END=== format.
+- The DOC must have clear sections: first a summary of the existing context, then a Research & Intelligence section with findings, then a combined Recommendations or Key Talking Points section.
+- Always end with a Sources section listing URLs for every web result used."""
 
 EDITOR_PROMPT = """You are a Google Drive editor specialist.
 
@@ -99,10 +127,14 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
             t.description = "Find files by name. Input MUST be a simple string (the filename)."
 
         def wrap_tool(tool_to_wrap):
+            # Capture whichever callable the tool actually uses at runtime.
+            # Async MCP tools from langchain-mcp-adapters use .coroutine, not .func,
+            # so we must wrap .coroutine or the sanitisation is silently bypassed.
+            original_coroutine = tool_to_wrap.coroutine
             original_func = tool_to_wrap.func
 
             async def safe_func(**kwargs):
-                for key, value in kwargs.items():
+                for key, value in list(kwargs.items()):
                     if isinstance(value, dict):
                         inner_val = next((v for v in value.values() if isinstance(v, str)), str(value))
                         kwargs[key] = inner_val
@@ -117,10 +149,12 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
                     keyword = match.group(1) if match else raw_val.strip()
                     clean_kw = keyword.replace("name", "").replace("contains", "").replace("fullText", "").strip(" '=")
                     kwargs[q_key] = f"name contains '{clean_kw}' and trashed = false"
-                    kwargs["spaces"] = "drive"
-                return await original_func(**kwargs)
+                if original_coroutine:
+                    return await original_coroutine(**kwargs)
+                return original_func(**kwargs)
 
-            tool_to_wrap.func = safe_func
+            tool_to_wrap.coroutine = safe_func
+            tool_to_wrap.func = None
             return tool_to_wrap
 
         final_mcp_tools.append(wrap_tool(t))
@@ -128,24 +162,6 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
     # ----------------------------------------------------------------
     # Shared helpers
     # ----------------------------------------------------------------
-    def _clean_content(text: str) -> str:
-        import csv, io
-        try:
-            rows = list(csv.reader(io.StringIO(text)))
-        except Exception:
-            return text
-        rows = [r for r in rows if any(c.strip() for c in r)]
-        if not rows:
-            return text
-        max_col = max(
-            (i for row in rows for i, c in enumerate(row) if c.strip()),
-            default=0,
-        )
-        trimmed = [row[:max_col + 1] for row in rows]
-        out = io.StringIO()
-        csv.writer(out).writerows(trimmed)
-        return out.getvalue()
-
     def _get_write_creds():
         token_path = Path.home() / ".mcp-gdrive" / "write-tokens.json"
         write_token_json = os.getenv("GCP_WRITE_TOKEN_JSON_RAW")
@@ -172,23 +188,77 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
     # ----------------------------------------------------------------
     # Read tools
     # ----------------------------------------------------------------
+    def _get_read_creds():
+        mcp_dir = Path.home() / ".mcp-gdrive"
+        token_path = mcp_dir / "tokens.json"
+        oauth_path = mcp_dir / "gcp-oauth.keys.json"
+
+        read_token_json = os.getenv("GCP_TOKEN_JSON_RAW")
+        if read_token_json and not token_path.exists():
+            token_path.write_text(read_token_json)
+        if not token_path.exists():
+            raise FileNotFoundError("Read credentials not found. Ensure GCP_TOKEN_JSON_RAW is set or run the auth flow.")
+
+        tokens = json.loads(token_path.read_text())
+
+        # tokens.json already has client_id/client_secret (write-token format) — use directly
+        if "client_id" in tokens and "client_secret" in tokens:
+            return Credentials.from_authorized_user_info(tokens)
+
+        # MCP server stores Node.js OAuth tokens without client credentials.
+        # Combine with gcp-oauth.keys.json to build a valid Credentials object.
+        if not oauth_path.exists():
+            raise FileNotFoundError("gcp-oauth.keys.json not found — cannot construct read credentials.")
+        oauth_raw = json.loads(oauth_path.read_text())
+        client_info = oauth_raw.get("web", oauth_raw.get("installed", oauth_raw))
+        combined = {
+            "client_id": client_info["client_id"],
+            "client_secret": client_info["client_secret"],
+            "refresh_token": tokens.get("refresh_token", ""),
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        return Credentials.from_authorized_user_info(combined)
+
     async def _read_drive_file(filename: str) -> str:
-        async with mcp_client.session("google_workspace") as session:
-            cursor = None
-            for _ in range(20):
-                params = PaginatedRequestParams(cursor=cursor) if cursor else None
-                listing = await session.list_resources(params=params)
-                for resource in listing.resources:
-                    if filename.lower() in resource.name.lower():
-                        content_result = await session.read_resource(str(resource.uri))
-                        if content_result.contents:
-                            raw = getattr(content_result.contents[0], "text", str(content_result.contents[0]))
-                            return _clean_content(raw)
-                        return "File found but is empty or cannot be read as text."
-                cursor = getattr(listing, "nextCursor", None)
-                if not cursor:
-                    break
-        return f"No file matching '{filename}' was found in Google Drive."
+        import asyncio
+
+        def _sync_read():
+            try:
+                creds = _get_read_creds()
+            except Exception as e:
+                return f"Credential error: {e}"
+
+            try:
+                drive = build("drive", "v3", credentials=creds)
+                results = drive.files().list(
+                    q=f"name contains '{filename}' and trashed = false",
+                    fields="files(id, name, mimeType)",
+                    pageSize=10,
+                ).execute()
+            except Exception as e:
+                return f"Drive search error: {e}"
+
+            files = results.get("files", [])
+            if not files:
+                return f"No file matching '{filename}' was found in Google Drive."
+
+            file = files[0]
+            file_id = file["id"]
+            mime_type = file.get("mimeType", "")
+            name = file.get("name", filename)
+
+            try:
+                if "google-apps.document" in mime_type:
+                    content = drive.files().export(fileId=file_id, mimeType="text/plain").execute()
+                elif "google-apps.spreadsheet" in mime_type:
+                    content = drive.files().export(fileId=file_id, mimeType="text/csv").execute()
+                else:
+                    content = drive.files().get_media(fileId=file_id).execute()
+                return content.decode("utf-8") if isinstance(content, bytes) else str(content)
+            except Exception as e:
+                return f"Found '{name}' but could not read its content: {e}"
+
+        return await asyncio.to_thread(_sync_read)
 
     read_file_tool = StructuredTool.from_function(
         coroutine=_read_drive_file,
@@ -323,7 +393,16 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
 
             for tc in response.tool_calls:
                 tool = tool_map.get(tc["name"])
-                result = await tool.ainvoke(tc["args"]) if tool else f"Unknown tool: {tc['name']}"
+                if tool:
+                    try:
+                        result = await tool.ainvoke(tc["args"])
+                    except Exception as err:
+                        inner = err
+                        while hasattr(inner, "exceptions") and inner.exceptions:
+                            inner = inner.exceptions[0]
+                        result = f"Tool error ({tc['name']}): {type(inner).__name__}: {inner}"
+                else:
+                    result = f"Unknown tool: {tc['name']}"
                 messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
 
         return str(messages[-1].content)
@@ -359,10 +438,31 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
     # ----------------------------------------------------------------
     # Web search tool
     # ----------------------------------------------------------------
-    def _web_search(query: str) -> str:
-        results = list(DDGS().text(query, max_results=5))
+    def _web_search(query: str, timelimit: str = "m") -> str:
+        """timelimit: 'd' (day), 'w' (week), 'm' (month), 'y' (year), or None for all time."""
+        results = []
+        last_error = None
+        for attempt in range(3):
+            try:
+                results = list(DDGS().text(query, max_results=5, timelimit=timelimit))
+                if results:
+                    break
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+
+        # Fallback: retry without time filter if timelimited search returned nothing
+        if not results and timelimit:
+            try:
+                results = list(DDGS().text(query, max_results=5))
+            except Exception as e:
+                last_error = e
+
         if not results:
-            return "No results found."
+            if last_error:
+                return f"Web search failed: {type(last_error).__name__}: {last_error}"
+            return "No results found for this query."
         return "\n\n".join(
             f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results
         )
@@ -370,7 +470,12 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
     web_search_tool = StructuredTool.from_function(
         func=_web_search,
         name="web_search",
-        description="Search the web for live information or current events. Pass a search query string.",
+        description=(
+            "Search the web for live information or current events. "
+            "Pass a search query string. "
+            "Optionally pass timelimit='d' (past day), 'w' (past week), "
+            "'m' (past month), or 'y' (past year) to filter for recent results."
+        ),
     )
 
     # ----------------------------------------------------------------
