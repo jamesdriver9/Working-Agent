@@ -57,10 +57,12 @@ READER_PROMPT = """You are a Google Drive reader specialist.
 
 You have access to:
 1. 'list_drive_files' — search for files in Google Drive by name.
-2. 'read_drive_file' — read the full contents of a file. Pass the filename.
+2. 'read_drive_file' — read the full contents of a file. Pass the filename or part of it.
 
 Rules:
 - When searching Drive, NEVER use the 'fullText' operator. Search by name only.
+- Always call 'list_drive_files' first to search for the file.
+- If 'list_drive_files' returns no results or you are unsure, STILL call 'read_drive_file' directly with the filename — it searches all drives including Shared Drives.
 - Return the file contents clearly and completely."""
 
 CODER_PROMPT = """You are a research analyst and report writer.
@@ -234,6 +236,9 @@ async def get_agent_app(mcp_client: MultiServerMCPClient):
                     q=f"name contains '{filename}' and trashed = false",
                     fields="files(id, name, mimeType)",
                     pageSize=10,
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True,
+                    corpora="allDrives",
                 ).execute()
             except Exception as e:
                 return f"Drive search error: {e}"
